@@ -54,6 +54,11 @@ if "proposals_data" not in st.session_state: st.session_state.proposals_data = N
 if "meeting_summary" not in st.session_state: st.session_state.meeting_summary = ""
 if "temp_edited_data" not in st.session_state: st.session_state.temp_edited_data = []
 
+# マッチング精度を高めるための文字正規化ツール
+def normalize_str(s):
+    if not s: return ""
+    return str(s).replace("-", "").replace(" ", "").replace(" ", "").upper()
+
 # ---------------------------------------------------------
 # 3. 削除用ポップアップ（ダイアログ）
 # ---------------------------------------------------------
@@ -98,66 +103,138 @@ with st.sidebar:
 # =========================================================
 if page_mode == "⚙️ ナレッジ・マスタ管理":
     st.markdown("## ⚙️ ナレッジ・マスタ管理")
-    st.markdown("CSVの取り込みや、マスタデータの一覧編集をこの画面で広く行えます。")
     st.markdown("---")
 
-    st.markdown("#### 📊 1. CSVインポート（マッピング）")
-    
-    col_csv, col_opt = st.columns([2, 1])
-    with col_csv:
-        uploaded_csv = st.file_uploader("基幹システムのCSVファイルを選択", type=["csv"])
-    with col_opt:
-        header_row = st.number_input("列名（ヘッダー）がある行番号", min_value=1, value=1, help="もし1行目がファイル名などになっている場合は「2」や「3」に変更してください。")
+    # --- 1. CSVインポート ---
+    with st.expander("📊 1. CSVインポート（基本データの登録）", expanded=False):
+        col_csv, col_opt = st.columns([2, 1])
+        with col_csv:
+            uploaded_csv = st.file_uploader("基幹システムのCSVファイルを選択", type=["csv"])
+        with col_opt:
+            header_row = st.number_input("列名（ヘッダー）がある行番号", min_value=1, value=1)
 
-    if uploaded_csv:
-        try:
-            # 文字コードを安全に読み込む処理
-            bytes_data = uploaded_csv.getvalue()
+        if uploaded_csv:
             try:
-                csv_text = bytes_data.decode('utf-8')
-            except UnicodeDecodeError:
-                try:
-                    csv_text = bytes_data.decode('shift_jis')
+                bytes_data = uploaded_csv.getvalue()
+                try: csv_text = bytes_data.decode('utf-8')
                 except UnicodeDecodeError:
-                    csv_text = bytes_data.decode('cp932')
+                    try: csv_text = bytes_data.decode('shift_jis')
+                    except UnicodeDecodeError: csv_text = bytes_data.decode('cp932')
 
-            # 指定された行番号をヘッダーとしてDataFrameに変換
-            df = pd.read_csv(io.StringIO(csv_text), header=header_row - 1)
+                df = pd.read_csv(io.StringIO(csv_text), header=header_row - 1)
+                st.write("▼ プレビュー (最初の3行)")
+                st.dataframe(df.head(3), use_container_width=True)
+                
+                cols = ["(未割り当て)"] + [str(c) for c in df.columns.tolist()]
+                
+                st.markdown("**列の紐付け（マッピング）**")
+                c1, c2, c3, c4, c5, c6 = st.columns(6)
+                map_tais = c1.selectbox("TAISコード", cols, index=0)
+                map_category = c2.selectbox("種目", cols, index=0)
+                map_name = c3.selectbox("商品名", cols, index=0)
+                map_maker = c4.selectbox("メーカー", cols, index=0)
+                map_model = c5.selectbox("型式", cols, index=0)
+                map_price = c6.selectbox("レンタル価格", cols, index=0)
+                
+                if st.button("マッピングしてシステムに登録", type="primary"):
+                    new_items = []
+                    for _, row in df.iterrows():
+                        new_items.append({
+                            "tais_code": str(row[map_tais]) if map_tais != "(未割り当て)" else "",
+                            "category": str(row[map_category]) if map_category != "(未割り当て)" else "【貸与】未分類",
+                            "name": str(row[map_name]) if map_name != "(未割り当て)" else "",
+                            "maker": str(row[map_maker]) if map_maker != "(未割り当て)" else "",
+                            "model": str(row[map_model]) if map_model != "(未割り当て)" else "",
+                            "rental_price": str(row[map_price]) if map_price != "(未割り当て)" else "",
+                            "is_active": True, "memo": "", "delete_flag": False
+                        })
+                    st.session_state.master_data.extend(new_items)
+                    save_master_data()
+                    st.success(f"{len(new_items)}件をマスタに登録しました！")
+            except Exception as e:
+                st.error(f"CSV読み込みエラー: {e}")
+
+    # --- 2. PDF一括ナレッジ結合（NEW） ---
+    with st.expander("📚 2. カタログPDFからナレッジ一括自動生成（紐付け）", expanded=True):
+        st.markdown("対象のメーカーを選択し、PDFファイルを一括でアップロードすると、AIが型式を照合してスライド要素を自動結合します。")
+        
+        # マスタからメーカーとTAISのプレフィックスを抽出して選択肢を作成
+        maker_options = ["(選択してください)"]
+        maker_dict = {}
+        for item in st.session_state.master_data:
+            maker = item.get("maker", "").strip()
+            tais = item.get("tais_code", "").strip()
+            if maker and tais:
+                prefix = tais.split("-")[0] if "-" in tais else tais[:5]
+                opt_label = f"{maker} (TAIS: {prefix})"
+                if opt_label not in maker_options:
+                    maker_options.append(opt_label)
+                    maker_dict[opt_label] = maker
+
+        selected_maker_label = st.selectbox("🎯 対象のメーカーを選択", maker_options)
+        
+        if selected_maker_label != "(選択してください)":
+            target_maker_name = maker_dict[selected_maker_label]
+            uploaded_pdfs = st.file_uploader("カタログPDFを選択（複数ファイルをドロップ可）", type=["pdf"], accept_multiple_files=True)
             
-            st.write("▼ 読み込んだCSVのプレビュー (最初の3行)")
-            st.dataframe(df.head(3), use_container_width=True)
-            
-            cols = ["(未割り当て)"] + [str(c) for c in df.columns.tolist()]
-            
-            st.markdown("**列の紐付け（マッピング）**")
-            c1, c2, c3, c4, c5, c6 = st.columns(6)
-            map_tais = c1.selectbox("TAISコード", cols, index=0)
-            map_category = c2.selectbox("種目", cols, index=0)
-            map_name = c3.selectbox("商品名", cols, index=0)
-            map_maker = c4.selectbox("メーカー", cols, index=0)
-            map_model = c5.selectbox("型式", cols, index=0)
-            map_price = c6.selectbox("レンタル価格", cols, index=0)
-            
-            if st.button("マッピングしてシステムに登録", type="primary"):
-                new_items = []
-                for _, row in df.iterrows():
-                    new_items.append({
-                        "tais_code": str(row[map_tais]) if map_tais != "(未割り当て)" else "",
-                        "category": str(row[map_category]) if map_category != "(未割り当て)" else "【貸与】未分類",
-                        "name": str(row[map_name]) if map_name != "(未割り当て)" else "",
-                        "maker": str(row[map_maker]) if map_maker != "(未割り当て)" else "",
-                        "model": str(row[map_model]) if map_model != "(未割り当て)" else "",
-                        "rental_price": str(row[map_price]) if map_price != "(未割り当て)" else "",
-                        "is_active": True, "memo": "", "delete_flag": False
-                    })
-                st.session_state.master_data.extend(new_items)
+            if uploaded_pdfs and st.button("🚀 AI解析 ＆ マスタ自動結合スタート", type="primary"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                client = genai.Client(api_key=GEMINI_API_KEY)
+                pdf_prompt = """以下の福祉用具PDFカタログから情報を抽出し、JSONで出力してください。
+【抽出項目】"model" (型式：英数字など), "name" (商品名)
+【スライド要素】
+- "catchphrase": 利用者が直感的にメリットを感じる一言（20文字以内）
+- "benefit_1"〜"benefit_3": 視覚的・機能的メリット（各30文字以内）
+- "safety_note": 現場で伝えるべき注意事項
+【フォーマット】 {"model":"", "name":"", "catchphrase":"", "benefit_1":"", "benefit_2":"", "benefit_3":"", "safety_note":""}"""
+
+                for i, pdf_file in enumerate(uploaded_pdfs):
+                    status_text.text(f"解析中... ({i+1}/{len(uploaded_pdfs)}) : {pdf_file.name}")
+                    try:
+                        pdf_part = types.Part.from_bytes(data=pdf_file.getvalue(), mime_type="application/pdf")
+                        config = types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1)
+                        response = client.models.generate_content(model="gemini-3.6-flash", contents=[pdf_part, pdf_prompt], config=config)
+                        
+                        clean_json = response.text.strip().replace("```json", "").replace("```", "")
+                        result = json.loads(clean_json)
+                        
+                        extracted_model = normalize_str(result.get("model", ""))
+                        extracted_name = normalize_str(result.get("name", ""))
+                        
+                        # 自動マッチング（型式 または 商品名 で検索）
+                        match_found = False
+                        for item in st.session_state.master_data:
+                            if item.get("maker") == target_maker_name:
+                                master_model = normalize_str(item.get("model", ""))
+                                master_name = normalize_str(item.get("name", ""))
+                                
+                                # 型式が一致、または商品名が部分一致すれば紐付け
+                                if (extracted_model and extracted_model in master_model) or \
+                                   (extracted_name and extracted_name in master_name):
+                                    item["catchphrase"] = result.get("catchphrase", "")
+                                    item["benefit_1"] = result.get("benefit_1", "")
+                                    item["benefit_2"] = result.get("benefit_2", "")
+                                    item["benefit_3"] = result.get("benefit_3", "")
+                                    item["safety_note"] = result.get("safety_note", "")
+                                    match_found = True
+                                    st.success(f"✅ 結合成功: {pdf_file.name} ➔ マスタ: {item.get('name')}")
+                                    break
+                        
+                        if not match_found:
+                            st.warning(f"⚠️ マッチ対象なし: {pdf_file.name} (抽出型式: {result.get('model')})")
+
+                    except Exception as e:
+                        st.error(f"❌ 解析エラー ({pdf_file.name}): {e}")
+                    
+                    progress_bar.progress((i + 1) / len(uploaded_pdfs))
+                
                 save_master_data()
-                st.success(f"{len(new_items)}件をマスタに登録しました！")
-        except Exception as e:
-            st.error(f"CSV読み込みエラー: {e} （行番号の指定などが間違っていないかご確認ください）")
+                status_text.text("🎉 すべての処理が完了しました！")
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("#### ✏️ 2. マスタデータの一覧編集 ＆ 削除")
+    # --- 3. マスタ編集 ---
+    st.markdown("#### ✏️ 3. マスタデータの一覧編集 ＆ 削除")
     if st.session_state.master_data:
         df_master = pd.DataFrame(st.session_state.master_data)
         if "delete_flag" not in df_master.columns: df_master["delete_flag"] = False
@@ -197,17 +274,9 @@ elif page_mode == "📝 アセスメント ＆ AI提案":
 
         with c2:
             st.markdown("**📦 複合パッケージ（選定種目）の指定**")
-            main_categories = st.multiselect("基本の福祉用具", ["特殊寝台（ベッド）", "車いす", "手すり", "未分類"], default=["特殊寝台（ベッド）"])
-            
-            selected_cats = []
-            if "特殊寝台（ベッド）" in main_categories:
-                selected_cats.append("【貸与】特殊寝台本体")
-                st.markdown("<div class='sub-check-box'>", unsafe_allow_html=True)
-                if st.checkbox("＋ マットレス", value=True): selected_cats.append("【貸与】特殊寝台付属品（マットレス）")
-                st.markdown("</div>", unsafe_allow_html=True)
-            if "車いす" in main_categories: selected_cats.append("【貸与】車いす本体")
-            if "手すり" in main_categories: selected_cats.append("【貸与】手すり")
-            if "未分類" in main_categories: selected_cats.append("【貸与】未分類")
+            # マスタに存在するカテゴリを動的に取得して選択肢にする
+            available_categories = sorted(list(set([item.get("category", "") for item in st.session_state.master_data if item.get("category")])))
+            selected_cats = st.multiselect("マスタから選定する種目を選択", available_categories, default=available_categories[:1] if available_categories else None)
 
     generate_btn = st.button("🔍 実情に寄り添うパッケージ提案を生成", type="primary", use_container_width=True)
 
@@ -227,15 +296,19 @@ elif page_mode == "📝 アセスメント ＆ AI提案":
                     master_text += f"- TAIS:{item.get('tais_code','')} | 品名:{item.get('name','')} | 種目:{item.get('category','')} | 型式:{item.get('model','')}\n"
 
                 system_prompt = f"""
-あなたは福祉用具専門相談員のアシスタントAIです。以下の【マスタ】から指定された【複数種目の用具】を組み合わせたパッケージを2軸で提案してください。
+あなたは福祉用具専門相談員のアシスタントAIです。
+以下の【マスタ】の中に存在する商品のみを使って、指定された【複数種目の用具】を組み合わせたパッケージを2軸で提案してください。
+※提案する商品の TAISコード は、必ず【マスタ】にあるものを正確に出力してください。
+
 【マスタ】{master_text}
 【対象者情報】状況: {user_status} / 環境: {env_status}
+
 【厳守JSONフォーマット】
 {{
   "proposals": [
     {{
-      "axis_title": "① 【自立支援 特化セット】", "tool_name": "提案する用具一式",
-      "tais_codes": ["00789-000001"], "axis_description": "選定の狙い",
+      "axis_title": "① 【自立支援 特化セット】", "tool_name": "提案する具体的な商品名（複数可）",
+      "tais_codes": ["マスタに存在するTAISコード1", "TAISコード2"], "axis_description": "選定の狙い",
       "talk_script": "スタッフへの提案ヒント（箇条書き）", "plan_target": "計画書の目標", "plan_reason": "選定理由"
     }},
     {{ "axis_title": "② 【介助軽減 特化セット】", "tool_name": "...", "tais_codes": [], "axis_description": "...", "talk_script": "...", "plan_target": "...", "plan_reason": "..." }}
