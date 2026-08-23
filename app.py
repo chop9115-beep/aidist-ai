@@ -3,7 +3,6 @@ import json
 import os
 import pandas as pd
 import io
-import re
 import concurrent.futures
 from dotenv import load_dotenv
 from google import genai
@@ -61,10 +60,8 @@ def normalize_str(s):
     return str(s).replace("-", "").replace(" ", "").replace(" ", "").upper()
 
 def get_tais_maker_prefix(tais_code):
-    """TAISコードから、必ずハイフン前の5桁（メーカーコード）だけを抽出する"""
     tais_str = str(tais_code).strip()
     if not tais_str or tais_str == "nan": return ""
-    
     prefix = tais_str.split("-")[0] if "-" in tais_str else tais_str[:5]
     prefix = ''.join(filter(str.isdigit, prefix))[:5]
     return prefix.zfill(5) if prefix else ""
@@ -115,7 +112,6 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
     st.markdown("## ⚙️ ナレッジ・マスタ管理")
     st.markdown("---")
 
-    # --- 1. CSVインポート ---
     with st.expander("📊 1. CSVインポート（基本データの登録）", expanded=False):
         col_csv, col_opt = st.columns([2, 1])
         with col_csv:
@@ -164,9 +160,8 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
             except Exception as e:
                 st.error(f"CSV読み込みエラー: {e}")
 
-    # --- 2. PDF一括ナレッジ結合 ---
-    with st.expander("📚 2. カタログPDFからナレッジ一括自動生成（複数商品＆並列処理対応）", expanded=True):
-        st.markdown("メーカー名やTAISコード（5桁）を選択し、PDFをアップロードしてください。複数商品を同時に抽出し、高速処理します。")
+    with st.expander("📚 2. カタログPDFからナレッジ一括自動生成（全件抽出強化版）", expanded=True):
+        st.markdown("メーカー名やTAISコード（5桁）を選択し、PDFをアップロードしてください。カタログ内の全商品を徹底的に抽出します。")
         
         maker_options = ["(選択してください)"]
         maker_dict = {}
@@ -187,15 +182,17 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
             target_prefix = maker_dict[selected_maker_label]
             uploaded_pdfs = st.file_uploader("カタログPDFを選択（複数ファイルをドロップ可）", type=["pdf"], accept_multiple_files=True)
             
-            if uploaded_pdfs and st.button("🚀 超高速AI解析 ＆ 全自動結合スタート", type="primary"):
+            if uploaded_pdfs and st.button("🚀 限界突破AI解析 ＆ 全自動結合スタート", type="primary"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 results_summary = []
                 
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 
-                # 複数商品を配列（リスト）で出力するように指示を強化
-                pdf_prompt = """以下の福祉用具PDFから情報を抽出し、記載されている【全ての商品】について以下の要素を抽出し、JSONの配列（リスト）形式で出力してください。
+                # プロンプトを極限まで強化（省略の完全禁止）
+                pdf_prompt = """以下の福祉用具PDFカタログを隅々まで解析し、記載されている【全ての商品を1件残らず】完全に抽出してください。
+※重要※ AIの判断で途中で抽出を打ち切ったり、省略したりすることは絶対に禁止します。カタログ内に10点、20点、あるいはそれ以上商品がある場合でも、必ず全ての商品を抽出し、JSONの配列（リスト）形式で出力してください。
+
 【抽出項目】"model" (型式), "name" (商品名), "tais_code" (TAISコード:記載がある場合のみ)
 【スライド要素】
 - "catchphrase": 利用者が直感的にメリットを感じる一言（20文字以内）
@@ -203,15 +200,18 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
 - "safety_note": 現場で伝えるべき注意事項
 【フォーマット厳守】 [{"model":"", "name":"", "tais_code":"", "catchphrase":"", "benefit_1":"", "benefit_2":"", "benefit_3":"", "safety_note":""}]"""
 
-                # 1つのPDFを解析する関数
                 def analyze_pdf(pdf_bytes):
                     pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
-                    config = types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1)
+                    # 出力トークンを最大化して途切れを防ぐ
+                    config = types.GenerateContentConfig(
+                        response_mime_type="application/json", 
+                        temperature=0.1,
+                        max_output_tokens=8192
+                    )
                     response = client.models.generate_content(model="gemini-3.6-flash", contents=[pdf_part, pdf_prompt], config=config)
                     clean_json = response.text.strip().replace("```json", "").replace("```", "")
                     return json.loads(clean_json)
 
-                # 並列処理（マルチスレッド）で複数PDFを一気に解析
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     futures = {executor.submit(analyze_pdf, pdf_file.getvalue()): pdf_file for pdf_file in uploaded_pdfs}
                     
@@ -221,7 +221,7 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                         try:
                             result_list = future.result()
                             if isinstance(result_list, dict):
-                                result_list = [result_list] # 単一オブジェクトで返ってきた場合の安全装置
+                                result_list = [result_list]
                             
                             match_count = 0
                             for res in result_list:
@@ -229,7 +229,6 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                                 extracted_name = normalize_str(res.get("name", ""))
                                 extracted_tais = normalize_str(res.get("tais_code", ""))
                                 
-                                # マスタ全体から合致する商品を探す
                                 for item in st.session_state.master_data:
                                     item_prefix = get_tais_maker_prefix(item.get("tais_code", ""))
                                     
@@ -238,7 +237,6 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                                         master_name = normalize_str(item.get("name", ""))
                                         master_tais = normalize_str(item.get("tais_code", ""))
                                         
-                                        # 結合条件 (TAISコード一致優先、または型式・商品名の一致)
                                         is_match = False
                                         if extracted_tais and extracted_tais in master_tais:
                                             is_match = True
@@ -255,10 +253,12 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                                             item["safety_note"] = res.get("safety_note", "")
                                             match_count += 1
                                             results_summary.append(f"✅ 結合成功: {pdf_file.name} ➔ {item.get('name')} (型式: {item.get('model')})")
-                                            break # この抽出データは1つのマスタに結びついた
+                                            break
                             
                             if match_count == 0:
                                 results_summary.append(f"⚠️ マッチ対象なし: {pdf_file.name}")
+                            else:
+                                results_summary.append(f"📄 {pdf_file.name} から計 {match_count} 件の商品を抽出し、マスタに結合しました。")
 
                         except Exception as e:
                             results_summary.append(f"❌ 解析エラー ({pdf_file.name}): {e}")
@@ -270,14 +270,13 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                 save_master_data()
                 status_text.text("🎉 すべての処理が完了しました！")
                 
-                # 処理結果の一覧表示
                 with st.expander("処理結果の詳細を見る", expanded=True):
                     for msg in results_summary:
                         if "✅" in msg: st.success(msg)
                         elif "⚠️" in msg: st.warning(msg)
+                        elif "📄" in msg: st.info(msg)
                         else: st.error(msg)
 
-    # --- 3. マスタ編集 ---
     st.markdown("#### ✏️ 3. マスタデータの一覧編集 ＆ 削除")
     if st.session_state.master_data:
         df_master = pd.DataFrame(st.session_state.master_data)
