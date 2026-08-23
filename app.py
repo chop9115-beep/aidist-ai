@@ -94,20 +94,30 @@ def show_presentation_slide(item):
 # ---------------------------------------------------------
 with st.sidebar:
     st.info("👤 アカウント: 管理者 (ライセンス 1/5)")
-    st.success("📢 お知らせ: 新しいCSVマッピングと削除機能が追加されました。")
+    st.success("📢 お知らせ: CSVマッピングと削除機能（2段構え）を実装しました。")
     st.markdown("### ⚙️ ナレッジ・マスタ管理")
 
     with st.expander("📊 CSVインポート（6項目マッピング）"):
-        st.caption("アプリの6つの項目に対して、CSVの列を割り当ててください。")
+        st.caption("基幹システムから出力したCSVを読み込みます。")
         uploaded_csv = st.file_uploader("CSVを選択", type=["csv"])
+        
         if uploaded_csv:
             try:
-                df = pd.read_csv(uploaded_csv)
-                st.write("▼ プレビュー (最初の3行)")
+                # 文字コードエラー対策（日本の基幹システムはShift-JISが多い）
+                try:
+                    df = pd.read_csv(uploaded_csv, encoding='utf-8')
+                except UnicodeDecodeError:
+                    uploaded_csv.seek(0)
+                    df = pd.read_csv(uploaded_csv, encoding='shift_jis')
+
+                st.write("▼ 読み込んだCSVのプレビュー (最初の3行)")
                 st.dataframe(df.head(3))
                 
-                cols = ["(未割り当て)"] + df.columns.tolist()
+                # CSVの1行目（列名・ヘッダー）を抽出して選択肢にする
+                cols = ["(未割り当て)"] + [str(c) for c in df.columns.tolist()]
+                
                 st.markdown("**列の紐付け（マッピング）**")
+                st.info("アプリの各項目に対して、CSVの1行目（列名）のどれを当てはめるか選んでください。")
                 
                 col1, col2 = st.columns(2)
                 with col1:
@@ -135,7 +145,7 @@ with st.sidebar:
                     save_master_data()
                     st.success(f"{len(new_items)}件を登録しました！")
             except Exception as e:
-                st.error("CSV読み込みエラーです。")
+                st.error("CSV読み込みエラーです。1行目がヘッダー（列名）になっているかご確認ください。")
 
     with st.expander("✏️ マスタの編集と削除"):
         if st.session_state.master_data:
