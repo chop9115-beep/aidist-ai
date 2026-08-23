@@ -54,13 +54,12 @@ if "proposals_data" not in st.session_state: st.session_state.proposals_data = N
 if "meeting_summary" not in st.session_state: st.session_state.meeting_summary = ""
 if "temp_edited_data" not in st.session_state: st.session_state.temp_edited_data = []
 
-# マッチング精度を高めるための文字正規化ツール
 def normalize_str(s):
     if not s: return ""
     return str(s).replace("-", "").replace(" ", "").replace(" ", "").upper()
 
 # ---------------------------------------------------------
-# 3. 削除用ポップアップ（ダイアログ）
+# 3. ダイアログ（ポップアップ）
 # ---------------------------------------------------------
 @st.dialog("⚠️ 選択削除の確認")
 def confirm_delete_selected():
@@ -90,7 +89,7 @@ def show_presentation_slide(item):
     if item.get('rental_price'): st.markdown(f"<div class='slide-price'>目安ご利用料金： {item['rental_price']}</div>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 4. サイドバー（画面切り替えメニュー）
+# 4. サイドバー
 # ---------------------------------------------------------
 with st.sidebar:
     st.markdown("### 🦼 メニュー")
@@ -99,7 +98,7 @@ with st.sidebar:
     st.info("👤 アカウント: 管理者 (1/5)")
 
 # =========================================================
-# 画面A：ナレッジ・マスタ管理（フルスクリーン表示）
+# 画面A：ナレッジ・マスタ管理
 # =========================================================
 if page_mode == "⚙️ ナレッジ・マスタ管理":
     st.markdown("## ⚙️ ナレッジ・マスタ管理")
@@ -154,27 +153,28 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
             except Exception as e:
                 st.error(f"CSV読み込みエラー: {e}")
 
-    # --- 2. PDF一括ナレッジ結合（NEW） ---
+    # --- 2. PDF一括ナレッジ結合 ---
     with st.expander("📚 2. カタログPDFからナレッジ一括自動生成（紐付け）", expanded=True):
-        st.markdown("対象のメーカーを選択し、PDFファイルを一括でアップロードすると、AIが型式を照合してスライド要素を自動結合します。")
+        st.markdown("メーカー名やTAISコード（5桁）で検索・選択し、PDFをアップロードしてください。")
         
-        # マスタからメーカーとTAISのプレフィックスを抽出して選択肢を作成
+        # TAISコード5桁を含めた選択肢を生成
         maker_options = ["(選択してください)"]
         maker_dict = {}
         for item in st.session_state.master_data:
             maker = item.get("maker", "").strip()
             tais = item.get("tais_code", "").strip()
-            if maker and tais:
+            if tais:
                 prefix = tais.split("-")[0] if "-" in tais else tais[:5]
-                opt_label = f"{maker} (TAIS: {prefix})"
+                display_maker = maker if maker else "メーカー不明"
+                opt_label = f"{display_maker} (TAIS: {prefix})"
                 if opt_label not in maker_options:
                     maker_options.append(opt_label)
-                    maker_dict[opt_label] = maker
+                    maker_dict[opt_label] = prefix # prefix(5桁)を保持
 
-        selected_maker_label = st.selectbox("🎯 対象のメーカーを選択", maker_options)
+        selected_maker_label = st.selectbox("🎯 対象のメーカー / TAISコード(5桁) を検索・選択", maker_options)
         
         if selected_maker_label != "(選択してください)":
-            target_maker_name = maker_dict[selected_maker_label]
+            target_prefix = maker_dict[selected_maker_label]
             uploaded_pdfs = st.file_uploader("カタログPDFを選択（複数ファイルをドロップ可）", type=["pdf"], accept_multiple_files=True)
             
             if uploaded_pdfs and st.button("🚀 AI解析 ＆ マスタ自動結合スタート", type="primary"):
@@ -182,8 +182,8 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                 status_text = st.empty()
                 
                 client = genai.Client(api_key=GEMINI_API_KEY)
-                pdf_prompt = """以下の福祉用具PDFカタログから情報を抽出し、JSONで出力してください。
-【抽出項目】"model" (型式：英数字など), "name" (商品名)
+                pdf_prompt = """以下の福祉用具PDFから情報を抽出し、JSONで出力してください。
+【抽出項目】"model" (型式), "name" (商品名)
 【スライド要素】
 - "catchphrase": 利用者が直感的にメリットを感じる一言（20文字以内）
 - "benefit_1"〜"benefit_3": 視覚的・機能的メリット（各30文字以内）
@@ -203,14 +203,16 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                         extracted_model = normalize_str(result.get("model", ""))
                         extracted_name = normalize_str(result.get("name", ""))
                         
-                        # 自動マッチング（型式 または 商品名 で検索）
                         match_found = False
                         for item in st.session_state.master_data:
-                            if item.get("maker") == target_maker_name:
+                            item_tais = item.get("tais_code", "")
+                            item_prefix = item_tais.split("-")[0] if "-" in item_tais else item_tais[:5]
+                            
+                            # TAISコードの上5桁で絞り込んでからマッチング
+                            if item_prefix == target_prefix:
                                 master_model = normalize_str(item.get("model", ""))
                                 master_name = normalize_str(item.get("name", ""))
                                 
-                                # 型式が一致、または商品名が部分一致すれば紐付け
                                 if (extracted_model and extracted_model in master_model) or \
                                    (extracted_name and extracted_name in master_name):
                                     item["catchphrase"] = result.get("catchphrase", "")
@@ -219,7 +221,7 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                                     item["benefit_3"] = result.get("benefit_3", "")
                                     item["safety_note"] = result.get("safety_note", "")
                                     match_found = True
-                                    st.success(f"✅ 結合成功: {pdf_file.name} ➔ マスタ: {item.get('name')}")
+                                    st.success(f"✅ 結合成功: {pdf_file.name} ➔ {item.get('name')}")
                                     break
                         
                         if not match_found:
@@ -239,7 +241,6 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
         df_master = pd.DataFrame(st.session_state.master_data)
         if "delete_flag" not in df_master.columns: df_master["delete_flag"] = False
         
-        st.info("直接セルをクリックして文字を編集できます。削除したい場合は右端の「delete_flag」にチェックを入れてください。")
         edited_df = st.data_editor(df_master, num_rows="dynamic", use_container_width=True, hide_index=True, height=400)
         
         c_save, c_del, c_delall, _ = st.columns([2, 2, 2, 4])
@@ -259,7 +260,7 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
         st.warning("現在登録されているマスタデータはありません。")
 
 # =========================================================
-# 画面B：アセスメント ＆ AI提案（メイン画面）
+# 画面B：アセスメント ＆ AI提案
 # =========================================================
 elif page_mode == "📝 アセスメント ＆ AI提案":
     st.markdown("## 🦼 Aidist AI - 福祉用具選定アシスト")
@@ -274,7 +275,6 @@ elif page_mode == "📝 アセスメント ＆ AI提案":
 
         with c2:
             st.markdown("**📦 複合パッケージ（選定種目）の指定**")
-            # マスタに存在するカテゴリを動的に取得して選択肢にする
             available_categories = sorted(list(set([item.get("category", "") for item in st.session_state.master_data if item.get("category")])))
             selected_cats = st.multiselect("マスタから選定する種目を選択", available_categories, default=available_categories[:1] if available_categories else None)
 
@@ -307,9 +307,13 @@ elif page_mode == "📝 アセスメント ＆ AI提案":
 {{
   "proposals": [
     {{
-      "axis_title": "① 【自立支援 特化セット】", "tool_name": "提案する具体的な商品名（複数可）",
-      "tais_codes": ["マスタに存在するTAISコード1", "TAISコード2"], "axis_description": "選定の狙い",
-      "talk_script": "スタッフへの提案ヒント（箇条書き）", "plan_target": "計画書の目標", "plan_reason": "選定理由"
+      "axis_title": "① 【自立支援 特化セット】", 
+      "tool_name": "提案する具体的な商品名と型式（例: 楽匠プラス 2モーター KQ-73310 など）",
+      "tais_codes": ["マスタに存在するTAISコード1"], 
+      "axis_description": "選定の狙い",
+      "talk_script": "スタッフへの提案ヒント（箇条書き）", 
+      "plan_target": "計画書の目標", 
+      "plan_reason": "選定理由"
     }},
     {{ "axis_title": "② 【介助軽減 特化セット】", "tool_name": "...", "tais_codes": [], "axis_description": "...", "talk_script": "...", "plan_target": "...", "plan_reason": "..." }}
   ], "meeting_summary": "アセスメントの要約"
