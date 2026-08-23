@@ -3,6 +3,7 @@ import json
 import os
 import pandas as pd
 import io
+import re
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -33,7 +34,7 @@ st.markdown(
 )
 
 # ---------------------------------------------------------
-# 2. データ保存・読み込み関数
+# 2. データ保存・読み込み・補助関数
 # ---------------------------------------------------------
 def save_master_data():
     with open(MASTER_FILE_PATH, "w", encoding="utf-8") as f:
@@ -57,6 +58,18 @@ if "temp_edited_data" not in st.session_state: st.session_state.temp_edited_data
 def normalize_str(s):
     if not s: return ""
     return str(s).replace("-", "").replace(" ", "").replace(" ", "").upper()
+
+def get_tais_maker_prefix(tais_code):
+    """TAISコードから、必ずハイフン前の5桁（メーカーコード）だけを抽出する"""
+    tais_str = str(tais_code).strip()
+    if not tais_str or tais_str == "nan": return ""
+    
+    # ハイフンがあればその前を取得、なければ最初の5文字を取得
+    prefix = tais_str.split("-")[0] if "-" in tais_str else tais_str[:5]
+    # 数字だけを抽出し、最大5桁に固定
+    prefix = ''.join(filter(str.isdigit, prefix))[:5]
+    
+    return prefix.zfill(5) if prefix else ""
 
 # ---------------------------------------------------------
 # 3. ダイアログ（ポップアップ）
@@ -157,14 +170,14 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
     with st.expander("📚 2. カタログPDFからナレッジ一括自動生成（紐付け）", expanded=True):
         st.markdown("メーカー名やTAISコード（5桁）で検索・選択し、PDFをアップロードしてください。")
         
-        # TAISコード5桁を含めた選択肢を生成
+        # TAISコード5桁を厳密に抽出して選択肢を生成
         maker_options = ["(選択してください)"]
         maker_dict = {}
         for item in st.session_state.master_data:
             maker = item.get("maker", "").strip()
-            tais = item.get("tais_code", "").strip()
-            if tais:
-                prefix = tais.split("-")[0] if "-" in tais else tais[:5]
+            prefix = get_tais_maker_prefix(item.get("tais_code", ""))
+            
+            if prefix:
                 display_maker = maker if maker else "メーカー不明"
                 opt_label = f"{display_maker} (TAIS: {prefix})"
                 if opt_label not in maker_options:
@@ -205,10 +218,9 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                         
                         match_found = False
                         for item in st.session_state.master_data:
-                            item_tais = item.get("tais_code", "")
-                            item_prefix = item_tais.split("-")[0] if "-" in item_tais else item_tais[:5]
+                            # マスタ側のTAISコードも厳密に5桁を抽出して比較
+                            item_prefix = get_tais_maker_prefix(item.get("tais_code", ""))
                             
-                            # TAISコードの上5桁で絞り込んでからマッチング
                             if item_prefix == target_prefix:
                                 master_model = normalize_str(item.get("model", ""))
                                 master_name = normalize_str(item.get("name", ""))
