@@ -76,14 +76,11 @@ def get_tais_maker_prefix(tais_code):
 # Google Cloud 認証 ＆ Document AI 処理関数
 # =========================================================
 def get_gcp_credentials():
-    # Streamlit CloudのSecretsに直接JSON文字列として登録された場合を優先
     if "GCP_KEY_JSON" in st.secrets:
         key_dict = json.loads(st.secrets["GCP_KEY_JSON"])
         return service_account.Credentials.from_service_account_info(key_dict)
-    # 従来のSecrets形式
     elif "gcp_service_account" in st.secrets:
         return service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
-    # ローカル開発用 (.env)
     elif os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         return service_account.Credentials.from_service_account_file(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
     else:
@@ -229,14 +226,21 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
 
                 def analyze_pdf(pdf_bytes):
                     ocr_text = process_document_ocr(pdf_bytes)
-                    prompt = f"""以下のOCR抽出テキスト（福祉用具カタログ）を隅々まで解析し、記載されている【全ての商品を1件残らず】完全に抽出してください。
-※重要※ AIの判断で途中で抽出を打ち切ったり、省略したりすることは絶対に禁止します。カタログ内に10点、20点、あるいはそれ以上商品がある場合でも、必ず全ての商品を抽出し、JSONの配列（リスト）形式で出力してください。
+                    
+                    # ⚠️AIの出力ミスを防ぐための厳格なプロンプトに変更
+                    prompt = f"""以下のOCR抽出テキスト（福祉用具カタログ）を隅々まで解析し、記載されている全ての商品を抽出してください。
 
 【抽出項目】"model" (型式), "name" (商品名), "tais_code" (TAISコード:記載がある場合のみ)
 【スライド要素】
 - "catchphrase": 利用者が直感的にメリットを感じる一言（20文字以内）
 - "benefit_1"〜"benefit_3": 視覚的・機能的メリット（各30文字以内）
 - "safety_note": 現場で伝えるべき注意事項
+
+【⚠️プログラミング上の絶対ルール（必ず守ること）⚠️】
+1. 出力するテキストの中に「改行（\\n）」を絶対に入れないでください。
+2. テキストの中に「"（ダブルクォーテーション）」を含めないでください。必要な場合は「'（シングルクォーテーション）」に置き換えてください。
+3. 完璧なJSON配列として出力し、途中で途切れないようにしてください。
+
 【フォーマット厳守】 [{{"model":"", "name":"", "tais_code":"", "catchphrase":"", "benefit_1":"", "benefit_2":"", "benefit_3":"", "safety_note":""}}]
 
 --- OCR抽出テキスト ---
@@ -244,12 +248,17 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
 """
                     config = types.GenerateContentConfig(
                         response_mime_type="application/json", 
-                        temperature=0.1,
+                        temperature=0.0, # ブレをなくすため0.0に変更
                         max_output_tokens=8192
                     )
                     response = client_ai.models.generate_content(model="gemini-3.6-flash", contents=prompt, config=config)
                     clean_json = response.text.strip().replace("```json", "").replace("```", "")
-                    return json.loads(clean_json)
+                    
+                    try:
+                        return json.loads(clean_json)
+                    except json.JSONDecodeError as e:
+                        # 万が一AIがミスをした場合のエラーハンドリングを追加
+                        raise ValueError(f"AIのデータ形式エラー。再実行してください。（詳細: {str(e)}）")
 
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     futures = {executor.submit(analyze_pdf, pdf_file.getvalue()): pdf_file for pdf_file in uploaded_pdfs}
