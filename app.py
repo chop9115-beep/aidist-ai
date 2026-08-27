@@ -227,7 +227,6 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                 def analyze_pdf(pdf_bytes):
                     ocr_text = process_document_ocr(pdf_bytes)
                     
-                    # ⚠️AIの出力ミスを防ぐための厳格なプロンプトに変更
                     prompt = f"""以下のOCR抽出テキスト（福祉用具カタログ）を隅々まで解析し、記載されている全ての商品を抽出してください。
 
 【抽出項目】"model" (型式), "name" (商品名), "tais_code" (TAISコード:記載がある場合のみ)
@@ -248,7 +247,7 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
 """
                     config = types.GenerateContentConfig(
                         response_mime_type="application/json", 
-                        temperature=0.0, # ブレをなくすため0.0に変更
+                        temperature=0.0, 
                         max_output_tokens=8192
                     )
                     response = client_ai.models.generate_content(model="gemini-3.6-flash", contents=prompt, config=config)
@@ -257,7 +256,6 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                     try:
                         return json.loads(clean_json)
                     except json.JSONDecodeError as e:
-                        # 万が一AIがミスをした場合のエラーハンドリングを追加
                         raise ValueError(f"AIのデータ形式エラー。再実行してください。（詳細: {str(e)}）")
 
                 with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -372,10 +370,14 @@ elif page_mode == "📝 アセスメント ＆ AI提案":
                 active_items = [item for item in st.session_state.master_data if item.get("is_active", True) and item.get("category") in selected_cats]
                 master_text = "【利用可能な自社登録マスタ】\n"
                 for item in active_items:
-                    master_text += f"- TAIS:{item.get('tais_code','')} | 品名:{item.get('name','')} | 種目:{item.get('category','')} | 型式:{item.get('model','')}\n"
+                    # ★AIにスライドデータがある商品をアピールする
+                    has_ai_data = "★スライド詳細データあり" if item.get("catchphrase") else ""
+                    master_text += f"- TAIS:{item.get('tais_code','')} | 品名:{item.get('name','')} | 種目:{item.get('category','')} | 型式:{item.get('model','')} {has_ai_data}\n"
 
                 system_prompt = f"""あなたは福祉用具専門相談員のアシスタントAIです。
 以下の【マスタ】の中に存在する商品のみを使って、指定された【複数種目の用具】を組み合わせたパッケージを2軸で提案してください。
+※重要※ マスタの中で「★スライド詳細データあり」と記載されている商品を【最優先】で選定してください。
+
 【マスタ】{master_text}
 【対象者情報】状況: {user_status} / 環境: {env_status}
 
@@ -419,12 +421,18 @@ elif page_mode == "📝 アセスメント ＆ AI提案":
                 with col_slide:
                     st.markdown("**📺 ご利用者向けスライド（可視化）**")
                     tais_list = p.get("tais_codes", [])
-                    found_items = [item for item in st.session_state.master_data if item.get("tais_code") in tais_list]
+                    # ★空文字のTAISを除外して、重複エラーを防ぐ
+                    valid_tais = [t for t in tais_list if str(t).strip()]
+                    found_items = [item for item in st.session_state.master_data if item.get("tais_code") in valid_tais and item.get("tais_code")]
+                    
                     if found_items:
-                        for item in found_items:
-                            if st.button(f"📱 {item.get('name','')} の図解", key=f"slide_btn_{i}_{item.get('tais_code','x')}", use_container_width=True):
+                        # ★ボタンキーにインデックス(j)を足して重複エラーを完全回避
+                        for j, item in enumerate(found_items):
+                            btn_key = f"slide_btn_{i}_{j}_{item.get('tais_code','x')}"
+                            if st.button(f"📱 {item.get('name','')} の図解", key=btn_key, use_container_width=True):
                                 show_presentation_slide(item)
-                    else: st.caption("※該当商品のスライドデータがありません")
+                    else: 
+                        st.caption("※該当商品のスライドデータがありません")
                 
                 st.code(f"【利用目標】\n{p['plan_target']}\n\n【選定理由】\n{p['plan_reason']}", language="text")
 
