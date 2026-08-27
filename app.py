@@ -10,14 +10,25 @@ from google import genai
 from google.genai import types
 from google.cloud import documentai
 from google.oauth2 import service_account
+from supabase import create_client, Client
 
 # ---------------------------------------------------------
-# 1. 基本設定 ＆ APIキー/認証読み込み
+# 1. 基本設定 ＆ APIキー/認証・DB接続読み込み
 # ---------------------------------------------------------
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-MASTER_FILE_PATH = "welfare_master_data.json"
 
+# Supabase の初期化
+def init_supabase():
+    url = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL", ""))
+    key = st.secrets.get("SUPABASE_KEY", os.getenv("SUPABASE_KEY", ""))
+    if url and key:
+        return create_client(url, key)
+    return None
+
+supabase: Client = init_supabase()
+
+# Document AI の設定情報
 DOCAI_PROCESSOR_ID = "bc9848f52b942b34"
 DOCAI_LOCATION = "us"
 
@@ -39,22 +50,45 @@ st.markdown(
 )
 
 # ---------------------------------------------------------
-# 2. データ保存・読み込み・補助関数
+# 2. データベース（Supabase）入出力関数
 # ---------------------------------------------------------
-def save_master_data():
-    with open(MASTER_FILE_PATH, "w", encoding="utf-8") as f:
-        json.dump({"master": st.session_state.master_data}, f, ensure_ascii=False, indent=2)
+def load_master_from_db():
+    if not supabase:
+        st.error("Supabaseが接続されていません。Secretsを確認してください。")
+        return []
+    try:
+        response = supabase.table("welfare_master").select("*").execute()
+        return response.data if response.data else []
+    except Exception as e:
+        st.error(f"DB読み込みエラー: {e}")
+        return []
 
-def load_master_data():
-    if os.path.exists(MASTER_FILE_PATH):
-        try:
-            with open(MASTER_FILE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f).get("master", [])
-        except Exception:
-            pass
-    return []
+def save_master_to_db(items):
+    if not supabase: return
+    try:
+        # Supabaseへ一括アップサート（tais_codeをキーにする）
+        if items:
+            supabase.table("welfare_master").upsert(items).execute()
+    except Exception as e:
+        st.error(f"DB保存エラー: {e}")
 
-if "master_data" not in st.session_state: st.session_state.master_data = load_master_data()
+def delete_items_from_db(tais_list):
+    if not supabase or not tais_list: return
+    try:
+        supabase.table("welfare_master").delete().in_("tais_code", tais_list).execute()
+    except Exception as e:
+        st.error(f"DB削除エラー: {e}")
+
+def delete_all_from_db():
+    if not supabase: return
+    try:
+        # 全削除（条件なしで全件削除）
+        supabase.table("welfare_master").delete().neq("tais_code", "XXX_DUMMY_XXX").execute()
+    except Exception as e:
+        st.error(f"DB一括削除エラー: {e}")
+
+if "master_data" not in st.session_state: 
+    st.session_state.master_data = load_master_from_db()
 if "proposals_data" not in st.session_state: st.session_state.proposals_data = None
 if "meeting_summary" not in st.session_state: st.session_state.meeting_summary = ""
 if "temp_edited_data" not in st.session_state: st.session_state.temp_edited_data = []
@@ -96,8 +130,9 @@ def process_document_ocr(file_bytes):
 def confirm_delete_selected():
     st.warning("チェックを入れた項目を削除します。よろしいですか？")
     if st.button("はい、削除します", type="primary"):
+        to_delete = [row.get("tais_code") for row in st.session_state.temp_edited_data if row.get("delete_flag", False) and row.get("tais_code")]
+        delete_items_from_db(to_delete)
         st.session_state.master_data = [row for row in st.session_state.temp_edited_data if not row.get("delete_flag", False)]
-        save_master_data()
         st.success("削除しました！")
         st.rerun()
 
@@ -105,8 +140,8 @@ def confirm_delete_selected():
 def confirm_delete_all():
     st.error("全てのマスタデータを完全に削除します。本当によろしいですか？")
     if st.button("はい、全て削除します", type="primary"):
+        delete_all_from_db()
         st.session_state.master_data = []
-        save_master_data()
         st.success("全てのデータを削除しました！")
         st.rerun()
 
@@ -126,13 +161,13 @@ with st.sidebar:
     st.markdown("### 🦼 メニュー")
     page_mode = st.radio("表示する画面を選択", ["📝 アセスメント ＆ AI提案", "⚙️ ナレッジ・マスタ管理"])
     st.markdown("---")
-    st.info("👤 アカウント: 管理者 (1/5)")
+    st.info("☁️ DB接続: Supabase 稼働中")
 
 # =========================================================
 # 画面A：ナレッジ・マスタ管理
 # =========================================================
 if page_mode == "⚙️ ナレッジ・マスタ管理":
-    st.markdown("## ⚙️ ナレッジ・マスタ管理")
+    st.markdown("## ⚙️ ナレッジ・マスタ管理 (Supabase連携)")
     st.markdown("---")
 
     with st.expander("📊 1. CSVインポート（基本データのUPSERT登録）", expanded=False):
@@ -164,40 +199,44 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                 map_model = c5.selectbox("型式", cols, index=0)
                 map_price = c6.selectbox("レンタル価格（単位数）", cols, index=0)
                 
-                if st.button("マッピングしてシステムに登録（更新/追加）", type="primary"):
+                if st.button("マッピングしてクラウドDBに登録（更新/追加）", type="primary"):
                     new_count, update_count = 0, 0
+                    batch_upsert_items = []
                     
                     for _, row in df.iterrows():
                         tais = str(row[map_tais]).strip() if map_tais != "(未割り当て)" else ""
+                        if not tais: continue # TAISがないものはスキップ
+                        
                         category = str(row[map_category]).strip() if map_category != "(未割り当て)" else "【貸与】未分類"
                         name = str(row[map_name]).strip() if map_name != "(未割り当て)" else ""
                         maker = str(row[map_maker]).strip() if map_maker != "(未割り当て)" else ""
                         model = str(row[map_model]).strip() if map_model != "(未割り当て)" else ""
                         price = str(row[map_price]).strip() if map_price != "(未割り当て)" else ""
                         
-                        # TAISコードで既存商品を検索（空白以外）
-                        existing_item = next((item for item in st.session_state.master_data if item.get("tais_code") == tais and tais != ""), None)
+                        existing_item = next((item for item in st.session_state.master_data if item.get("tais_code") == tais), None)
                         
                         if existing_item:
-                            # 既存商品の場合は、基本項目のみ更新（AI追加データは維持）
                             existing_item["category"] = category
                             existing_item["name"] = name
                             existing_item["maker"] = maker
                             existing_item["model"] = model
                             existing_item["rental_price"] = price
+                            batch_upsert_items.append(existing_item)
                             update_count += 1
                         else:
-                            # 新規商品の場合はマスタに追加
-                            st.session_state.master_data.append({
+                            new_item = {
                                 "tais_code": tais, "category": category, "name": name, 
                                 "maker": maker, "model": model, "rental_price": price,
                                 "is_active": True, "memo": "", "delete_flag": False,
                                 "catchphrase": "", "benefit_1": "", "benefit_2": "", "benefit_3": "", "safety_note": ""
-                            })
+                            }
+                            st.session_state.master_data.append(new_item)
+                            batch_upsert_items.append(new_item)
                             new_count += 1
                             
-                    save_master_data()
-                    st.success(f"処理完了！ (新規追加: {new_count}件, 基本情報更新: {update_count}件)")
+                    # データベースへ一括保存
+                    save_master_to_db(batch_upsert_items)
+                    st.success(f"クラウドDBへの同期完了！ (新規追加: {new_count}件, 基本情報更新: {update_count}件)")
                     time.sleep(1.5) 
                     st.rerun()    
             except Exception as e:
@@ -254,6 +293,7 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                     try: return json.loads(clean_json)
                     except Exception as e: raise ValueError(f"AIのデータ形式エラー ({str(e)})")
 
+                updated_items_for_db = []
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     futures = {executor.submit(analyze_pdf, pdf_file.getvalue()): pdf_file for pdf_file in uploaded_pdfs}
                     
@@ -282,7 +322,6 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                                         elif extracted_name and len(extracted_name) > 2 and extracted_name in master_name: is_match = True
                                             
                                         if is_match:
-                                            # ★すでにAI情報が入っている商品は上書きせずスキップする処理を追加
                                             if item.get("catchphrase"):
                                                 results_summary.append(f"⏩ スキップ: {item.get('name')} (既にAIデータ設定済み)")
                                             else:
@@ -292,6 +331,7 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                                                 item["benefit_3"] = res.get("benefit_3", "")
                                                 item["safety_note"] = res.get("safety_note", "")
                                                 match_count += 1
+                                                updated_items_for_db.append(item)
                                                 results_summary.append(f"✅ 結合成功: {pdf_file.name} ➔ {item.get('name')} (型式: {item.get('model')})")
                                             break
                             
@@ -305,7 +345,10 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                         progress_bar.progress(completed / len(uploaded_pdfs))
                         status_text.text(f"解析中... ({completed}/{len(uploaded_pdfs)})")
                 
-                save_master_data()
+                # データベースへ更新内容を保存
+                if updated_items_for_db:
+                    save_master_to_db(updated_items_for_db)
+
                 status_text.text("🎉 すべての処理が完了しました！")
                 
                 with st.expander("処理結果の詳細を見る", expanded=True):
@@ -324,10 +367,11 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
         
         c_save, c_del, c_delall, _ = st.columns([2, 2, 2, 4])
         with c_save:
-            if st.button("💾 編集を保存", use_container_width=True):
-                st.session_state.master_data = edited_df.to_dict(orient="records")
-                save_master_data()
-                st.success("保存しました！")
+            if st.button("💾 編集をクラウドDBに保存", use_container_width=True):
+                updated_list = edited_df.to_dict(orient="records")
+                st.session_state.master_data = updated_list
+                save_master_to_db(updated_list)
+                st.success("クラウドDBに保存しました！")
         with c_del:
             if st.button("🗑️ 選択削除", use_container_width=True):
                 st.session_state.temp_edited_data = edited_df.to_dict(orient="records")
