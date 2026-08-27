@@ -7,13 +7,18 @@ import concurrent.futures
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from google.cloud import documentai
+from google.oauth2 import service_account
 
 # ---------------------------------------------------------
-# 1. 基本設定 ＆ APIキー読み込み
+# 1. 基本設定 ＆ APIキー/認証読み込み
 # ---------------------------------------------------------
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 MASTER_FILE_PATH = "welfare_master_data.json"
+
+DOCAI_PROCESSOR_ID = "bc9848f52b942b34"
+DOCAI_LOCATION = "us"
 
 st.set_page_config(page_title="Aidist AI - 福祉用具選定", page_icon="🦼", layout="wide")
 
@@ -65,6 +70,31 @@ def get_tais_maker_prefix(tais_code):
     prefix = tais_str.split("-")[0] if "-" in tais_str else tais_str[:5]
     prefix = ''.join(filter(str.isdigit, prefix))[:5]
     return prefix.zfill(5) if prefix else ""
+
+# =========================================================
+# Google Cloud 認証 ＆ Document AI 処理関数
+# =========================================================
+def get_gcp_credentials():
+    if "gcp_service_account" in st.secrets:
+        return service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+    elif os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        return service_account.Credentials.from_service_account_file(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+    else:
+        raise ValueError("Google Cloud 認証情報が設定されていません。")
+
+def process_document_ocr(file_bytes):
+    creds = get_gcp_credentials()
+    project_id = creds.project_id
+    
+    opts = {"api_endpoint": f"{DOCAI_LOCATION}-documentai.googleapis.com"}
+    client = documentai.DocumentProcessorServiceClient(credentials=creds, client_options=opts)
+    
+    name = client.processor_path(project_id, DOCAI_LOCATION, DOCAI_PROCESSOR_ID)
+    raw_document = documentai.RawDocument(content=file_bytes, mime_type="application/pdf")
+    request = documentai.ProcessRequest(name=name, raw_document=raw_document)
+    
+    result = client.process_document(request=request)
+    return result.document.text
 
 # ---------------------------------------------------------
 # 3. ダイアログ（ポップアップ）
@@ -160,18 +190,16 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
             except Exception as e:
                 st.error(f"CSV読み込みエラー: {e}")
 
-    with st.expander("📚 2. カタログPDFからナレッジ一括自動生成（全件抽出強化版）", expanded=True):
-        st.markdown("メーカー名やTAISコード（5桁）を選択し、PDFをアップロードしてください。カタログ内の全商品を徹底的に抽出します。")
+    with st.expander("📚 2. ハイブリッドAI カタログ全自動結合（Document AI × Gemini）", expanded=True):
+        st.markdown("専用OCRでテキストを完全抽出し、AIで漏れなくマスタへ結合します。")
         
         maker_options = ["(選択してください)"]
         maker_dict = {}
         for item in st.session_state.master_data:
             maker = item.get("maker", "").strip()
             prefix = get_tais_maker_prefix(item.get("tais_code", ""))
-            
             if prefix:
-                display_maker = maker if maker else "メーカー不明"
-                opt_label = f"{display_maker} (TAIS: {prefix})"
+                opt_label = f"{maker if maker else 'メーカー不明'} (TAIS: {prefix})"
                 if opt_label not in maker_options:
                     maker_options.append(opt_label)
                     maker_dict[opt_label] = prefix 
@@ -182,15 +210,18 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
             target_prefix = maker_dict[selected_maker_label]
             uploaded_pdfs = st.file_uploader("カタログPDFを選択（複数ファイルをドロップ可）", type=["pdf"], accept_multiple_files=True)
             
-            if uploaded_pdfs and st.button("🚀 限界突破AI解析 ＆ 全自動結合スタート", type="primary"):
+            if uploaded_pdfs and st.button("🚀 ハイブリッド解析スタート", type="primary"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 results_summary = []
-                
-                client = genai.Client(api_key=GEMINI_API_KEY)
-                
-                # プロンプトを極限まで強化（省略の完全禁止）
-                pdf_prompt = """以下の福祉用具PDFカタログを隅々まで解析し、記載されている【全ての商品を1件残らず】完全に抽出してください。
+                client_ai = genai.Client(api_key=GEMINI_API_KEY)
+
+                def analyze_pdf(pdf_bytes):
+                    # 1. Document AI で純粋なテキストに変換
+                    ocr_text = process_document_ocr(pdf_bytes)
+                    
+                    # 2. 抽出したテキストをGeminiに渡してJSON化
+                    prompt = f"""以下のOCR抽出テキスト（福祉用具カタログ）を隅々まで解析し、記載されている【全ての商品を1件残らず】完全に抽出してください。
 ※重要※ AIの判断で途中で抽出を打ち切ったり、省略したりすることは絶対に禁止します。カタログ内に10点、20点、あるいはそれ以上商品がある場合でも、必ず全ての商品を抽出し、JSONの配列（リスト）形式で出力してください。
 
 【抽出項目】"model" (型式), "name" (商品名), "tais_code" (TAISコード:記載がある場合のみ)
@@ -198,17 +229,17 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
 - "catchphrase": 利用者が直感的にメリットを感じる一言（20文字以内）
 - "benefit_1"〜"benefit_3": 視覚的・機能的メリット（各30文字以内）
 - "safety_note": 現場で伝えるべき注意事項
-【フォーマット厳守】 [{"model":"", "name":"", "tais_code":"", "catchphrase":"", "benefit_1":"", "benefit_2":"", "benefit_3":"", "safety_note":""}]"""
+【フォーマット厳守】 [{{"model":"", "name":"", "tais_code":"", "catchphrase":"", "benefit_1":"", "benefit_2":"", "benefit_3":"", "safety_note":""}}]
 
-                def analyze_pdf(pdf_bytes):
-                    pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
-                    # 出力トークンを最大化して途切れを防ぐ
+--- OCR抽出テキスト ---
+{ocr_text}
+"""
                     config = types.GenerateContentConfig(
                         response_mime_type="application/json", 
                         temperature=0.1,
                         max_output_tokens=8192
                     )
-                    response = client.models.generate_content(model="gemini-3.6-flash", contents=[pdf_part, pdf_prompt], config=config)
+                    response = client_ai.models.generate_content(model="gemini-3.6-flash", contents=prompt, config=config)
                     clean_json = response.text.strip().replace("```json", "").replace("```", "")
                     return json.loads(clean_json)
 
@@ -220,8 +251,7 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                         pdf_file = futures[future]
                         try:
                             result_list = future.result()
-                            if isinstance(result_list, dict):
-                                result_list = [result_list]
+                            if isinstance(result_list, dict): result_list = [result_list]
                             
                             match_count = 0
                             for res in result_list:
@@ -231,19 +261,15 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                                 
                                 for item in st.session_state.master_data:
                                     item_prefix = get_tais_maker_prefix(item.get("tais_code", ""))
-                                    
                                     if item_prefix == target_prefix:
                                         master_model = normalize_str(item.get("model", ""))
                                         master_name = normalize_str(item.get("name", ""))
                                         master_tais = normalize_str(item.get("tais_code", ""))
                                         
                                         is_match = False
-                                        if extracted_tais and extracted_tais in master_tais:
-                                            is_match = True
-                                        elif extracted_model and len(extracted_model) > 2 and extracted_model in master_model:
-                                            is_match = True
-                                        elif extracted_name and len(extracted_name) > 2 and extracted_name in master_name:
-                                            is_match = True
+                                        if extracted_tais and extracted_tais in master_tais: is_match = True
+                                        elif extracted_model and len(extracted_model) > 2 and extracted_model in master_model: is_match = True
+                                        elif extracted_name and len(extracted_name) > 2 and extracted_name in master_name: is_match = True
                                             
                                         if is_match:
                                             item["catchphrase"] = res.get("catchphrase", "")
@@ -255,10 +281,8 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                                             results_summary.append(f"✅ 結合成功: {pdf_file.name} ➔ {item.get('name')} (型式: {item.get('model')})")
                                             break
                             
-                            if match_count == 0:
-                                results_summary.append(f"⚠️ マッチ対象なし: {pdf_file.name}")
-                            else:
-                                results_summary.append(f"📄 {pdf_file.name} から計 {match_count} 件の商品を抽出し、マスタに結合しました。")
+                            if match_count == 0: results_summary.append(f"⚠️ マッチ対象なし: {pdf_file.name}")
+                            else: results_summary.append(f"📄 {pdf_file.name} から計 {match_count} 件の商品を抽出し、マスタに結合しました。")
 
                         except Exception as e:
                             results_summary.append(f"❌ 解析エラー ({pdf_file.name}): {e}")
@@ -281,7 +305,6 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
     if st.session_state.master_data:
         df_master = pd.DataFrame(st.session_state.master_data)
         if "delete_flag" not in df_master.columns: df_master["delete_flag"] = False
-        
         edited_df = st.data_editor(df_master, num_rows="dynamic", use_container_width=True, hide_index=True, height=400)
         
         c_save, c_del, c_delall, _ = st.columns([2, 2, 2, 4])
@@ -295,8 +318,7 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                 st.session_state.temp_edited_data = edited_df.to_dict(orient="records")
                 confirm_delete_selected()
         with c_delall:
-            if st.button("🚨 一括削除", use_container_width=True):
-                confirm_delete_all()
+            if st.button("🚨 一括削除", use_container_width=True): confirm_delete_all()
     else:
         st.warning("現在登録されているマスタデータはありません。")
 
@@ -322,7 +344,6 @@ elif page_mode == "📝 アセスメント ＆ AI提案":
     generate_btn = st.button("🔍 実情に寄り添うパッケージ提案を生成", type="primary", use_container_width=True)
 
     def call_gemini(prompt: str, is_json: bool = False) -> str:
-        if not GEMINI_API_KEY: raise ValueError("APIキーが設定されていません。")
         client = genai.Client(api_key=GEMINI_API_KEY)
         config = types.GenerateContentConfig(response_mime_type="application/json" if is_json else "text/plain", temperature=0.2)
         response = client.models.generate_content(model="gemini-3.6-flash", contents=prompt, config=config)
@@ -336,11 +357,8 @@ elif page_mode == "📝 アセスメント ＆ AI提案":
                 for item in active_items:
                     master_text += f"- TAIS:{item.get('tais_code','')} | 品名:{item.get('name','')} | 種目:{item.get('category','')} | 型式:{item.get('model','')}\n"
 
-                system_prompt = f"""
-あなたは福祉用具専門相談員のアシスタントAIです。
+                system_prompt = f"""あなたは福祉用具専門相談員のアシスタントAIです。
 以下の【マスタ】の中に存在する商品のみを使って、指定された【複数種目の用具】を組み合わせたパッケージを2軸で提案してください。
-※提案する商品の TAISコード は、必ず【マスタ】にあるものを正確に出力してください。
-
 【マスタ】{master_text}
 【対象者情報】状況: {user_status} / 環境: {env_status}
 
@@ -349,10 +367,10 @@ elif page_mode == "📝 アセスメント ＆ AI提案":
   "proposals": [
     {{
       "axis_title": "① 【自立支援 特化セット】", 
-      "tool_name": "提案する具体的な商品名と型式（例: 楽匠プラス 2モーター KQ-73310 など）",
+      "tool_name": "提案する具体的な商品名と型式",
       "tais_codes": ["マスタに存在するTAISコード1"], 
       "axis_description": "選定の狙い",
-      "talk_script": "スタッフへの提案ヒント（箇条書き）", 
+      "talk_script": "スタッフへの提案ヒント", 
       "plan_target": "計画書の目標", 
       "plan_reason": "選定理由"
     }},
@@ -385,18 +403,15 @@ elif page_mode == "📝 アセスメント ＆ AI提案":
                     st.markdown("**📺 ご利用者向けスライド（可視化）**")
                     tais_list = p.get("tais_codes", [])
                     found_items = [item for item in st.session_state.master_data if item.get("tais_code") in tais_list]
-                    
                     if found_items:
                         for item in found_items:
                             if st.button(f"📱 {item.get('name','')} の図解", key=f"slide_btn_{i}_{item.get('tais_code','x')}", use_container_width=True):
                                 show_presentation_slide(item)
-                    else:
-                        st.caption("※該当商品のスライドデータがありません")
+                    else: st.caption("※該当商品のスライドデータがありません")
                 
                 st.code(f"【利用目標】\n{p['plan_target']}\n\n【選定理由】\n{p['plan_reason']}", language="text")
 
         st.markdown("---")
         with st.container(border=True):
-            if st.session_state.meeting_summary:
-                st.code(st.session_state.meeting_summary, language="text")
+            if st.session_state.meeting_summary: st.code(st.session_state.meeting_summary, language="text")
             st.text_area("提案後のメモ", placeholder="例：ご本人様より「転倒が不安」との声があり、①で合意。", height=80, label_visibility="collapsed")
