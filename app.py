@@ -3,6 +3,7 @@ import json
 import os
 import pandas as pd
 import io
+import time
 import concurrent.futures
 from dotenv import load_dotenv
 from google import genai
@@ -17,6 +18,7 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 MASTER_FILE_PATH = "welfare_master_data.json"
 
+# Document AI の設定情報
 DOCAI_PROCESSOR_ID = "bc9848f52b942b34"
 DOCAI_LOCATION = "us"
 
@@ -157,7 +159,10 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                     try: csv_text = bytes_data.decode('shift_jis')
                     except UnicodeDecodeError: csv_text = bytes_data.decode('cp932')
 
+                # NaNエラーを防ぐため、空セルを全て空文字("")に変換
                 df = pd.read_csv(io.StringIO(csv_text), header=header_row - 1)
+                df = df.fillna("")
+                
                 st.write("▼ プレビュー (最初の3行)")
                 st.dataframe(df.head(3), use_container_width=True)
                 
@@ -176,17 +181,19 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                     new_items = []
                     for _, row in df.iterrows():
                         new_items.append({
-                            "tais_code": str(row[map_tais]) if map_tais != "(未割り当て)" else "",
-                            "category": str(row[map_category]) if map_category != "(未割り当て)" else "【貸与】未分類",
-                            "name": str(row[map_name]) if map_name != "(未割り当て)" else "",
-                            "maker": str(row[map_maker]) if map_maker != "(未割り当て)" else "",
-                            "model": str(row[map_model]) if map_model != "(未割り当て)" else "",
-                            "rental_price": str(row[map_price]) if map_price != "(未割り当て)" else "",
+                            "tais_code": str(row[map_tais]).strip() if map_tais != "(未割り当て)" else "",
+                            "category": str(row[map_category]).strip() if map_category != "(未割り当て)" else "【貸与】未分類",
+                            "name": str(row[map_name]).strip() if map_name != "(未割り当て)" else "",
+                            "maker": str(row[map_maker]).strip() if map_maker != "(未割り当て)" else "",
+                            "model": str(row[map_model]).strip() if map_model != "(未割り当て)" else "",
+                            "rental_price": str(row[map_price]).strip() if map_price != "(未割り当て)" else "",
                             "is_active": True, "memo": "", "delete_flag": False
                         })
                     st.session_state.master_data.extend(new_items)
                     save_master_data()
-                    st.success(f"{len(new_items)}件をマスタに登録しました！")
+                    st.success(f"{len(new_items)}件をマスタに登録しました！リストを更新します...")
+                    time.sleep(1) # メッセージを見せるための待機
+                    st.rerun()    # 強制的に画面をリフレッシュしてリストに反映
             except Exception as e:
                 st.error(f"CSV読み込みエラー: {e}")
 
