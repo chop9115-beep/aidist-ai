@@ -77,8 +77,14 @@ def get_tais_maker_prefix(tais_code):
 # Google Cloud 認証 ＆ Document AI 処理関数
 # =========================================================
 def get_gcp_credentials():
-    if "gcp_service_account" in st.secrets:
+    # Streamlit CloudのSecretsに直接JSON文字列として登録された場合を優先
+    if "GCP_KEY_JSON" in st.secrets:
+        key_dict = json.loads(st.secrets["GCP_KEY_JSON"])
+        return service_account.Credentials.from_service_account_info(key_dict)
+    # 従来のSecrets形式
+    elif "gcp_service_account" in st.secrets:
         return service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+    # ローカル開発用 (.env)
     elif os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         return service_account.Credentials.from_service_account_file(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
     else:
@@ -159,7 +165,6 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                     try: csv_text = bytes_data.decode('shift_jis')
                     except UnicodeDecodeError: csv_text = bytes_data.decode('cp932')
 
-                # NaNエラーを防ぐため、空セルを全て空文字("")に変換
                 df = pd.read_csv(io.StringIO(csv_text), header=header_row - 1)
                 df = df.fillna("")
                 
@@ -192,8 +197,8 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                     st.session_state.master_data.extend(new_items)
                     save_master_data()
                     st.success(f"{len(new_items)}件をマスタに登録しました！リストを更新します...")
-                    time.sleep(1) # メッセージを見せるための待機
-                    st.rerun()    # 強制的に画面をリフレッシュしてリストに反映
+                    time.sleep(1) 
+                    st.rerun()    
             except Exception as e:
                 st.error(f"CSV読み込みエラー: {e}")
 
@@ -224,10 +229,7 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                 client_ai = genai.Client(api_key=GEMINI_API_KEY)
 
                 def analyze_pdf(pdf_bytes):
-                    # 1. Document AI で純粋なテキストに変換
                     ocr_text = process_document_ocr(pdf_bytes)
-                    
-                    # 2. 抽出したテキストをGeminiに渡してJSON化
                     prompt = f"""以下のOCR抽出テキスト（福祉用具カタログ）を隅々まで解析し、記載されている【全ての商品を1件残らず】完全に抽出してください。
 ※重要※ AIの判断で途中で抽出を打ち切ったり、省略したりすることは絶対に禁止します。カタログ内に10点、20点、あるいはそれ以上商品がある場合でも、必ず全ての商品を抽出し、JSONの配列（リスト）形式で出力してください。
 
