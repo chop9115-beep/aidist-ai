@@ -28,7 +28,6 @@ st.markdown(
     """
     <style>
         html, body, [class*="css"] { font-size: 13.5px; }
-        header[data-testid="stHeader"] { display: none !important; }
         .block-container { padding: 15px 2rem 150px 2rem !important; }
         .sub-check-box { margin-top: -10px; margin-bottom: 15px; padding-left: 15px; border-left: 3px solid #cbd5e1; }
         .slide-catchphrase { font-size: 1.8rem; font-weight: 800; color: #1E40AF; text-align: center; margin-bottom: 1rem; }
