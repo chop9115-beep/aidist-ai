@@ -18,7 +18,6 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 MASTER_FILE_PATH = "welfare_master_data.json"
 
-# Document AI の設定情報
 DOCAI_PROCESSOR_ID = "bc9848f52b942b34"
 DOCAI_LOCATION = "us"
 
@@ -55,8 +54,7 @@ def load_master_data():
             pass
     return []
 
-if "master_data" not in st.session_state:
-    st.session_state.master_data = load_master_data()
+if "master_data" not in st.session_state: st.session_state.master_data = load_master_data()
 if "proposals_data" not in st.session_state: st.session_state.proposals_data = None
 if "meeting_summary" not in st.session_state: st.session_state.meeting_summary = ""
 if "temp_edited_data" not in st.session_state: st.session_state.temp_edited_data = []
@@ -72,13 +70,9 @@ def get_tais_maker_prefix(tais_code):
     prefix = ''.join(filter(str.isdigit, prefix))[:5]
     return prefix.zfill(5) if prefix else ""
 
-# =========================================================
-# Google Cloud 認証 ＆ Document AI 処理関数
-# =========================================================
 def get_gcp_credentials():
     if "GCP_KEY_JSON" in st.secrets:
-        key_dict = json.loads(st.secrets["GCP_KEY_JSON"])
-        return service_account.Credentials.from_service_account_info(key_dict)
+        return service_account.Credentials.from_service_account_info(json.loads(st.secrets["GCP_KEY_JSON"]))
     elif "gcp_service_account" in st.secrets:
         return service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
     elif os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
@@ -88,24 +82,19 @@ def get_gcp_credentials():
 
 def process_document_ocr(file_bytes):
     creds = get_gcp_credentials()
-    project_id = creds.project_id
-    
     opts = {"api_endpoint": f"{DOCAI_LOCATION}-documentai.googleapis.com"}
     client = documentai.DocumentProcessorServiceClient(credentials=creds, client_options=opts)
-    
-    name = client.processor_path(project_id, DOCAI_LOCATION, DOCAI_PROCESSOR_ID)
+    name = client.processor_path(creds.project_id, DOCAI_LOCATION, DOCAI_PROCESSOR_ID)
     raw_document = documentai.RawDocument(content=file_bytes, mime_type="application/pdf")
     request = documentai.ProcessRequest(name=name, raw_document=raw_document)
-    
-    result = client.process_document(request=request)
-    return result.document.text
+    return client.process_document(request=request).document.text
 
 # ---------------------------------------------------------
-# 3. ダイアログ（ポップアップ）
+# 3. ダイアログ
 # ---------------------------------------------------------
 @st.dialog("⚠️ 選択削除の確認")
 def confirm_delete_selected():
-    st.warning("「delete_flag」にチェックを入れた項目を削除します。よろしいですか？")
+    st.warning("チェックを入れた項目を削除します。よろしいですか？")
     if st.button("はい、削除します", type="primary"):
         st.session_state.master_data = [row for row in st.session_state.temp_edited_data if not row.get("delete_flag", False)]
         save_master_data()
@@ -146,7 +135,7 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
     st.markdown("## ⚙️ ナレッジ・マスタ管理")
     st.markdown("---")
 
-    with st.expander("📊 1. CSVインポート（基本データの登録）", expanded=False):
+    with st.expander("📊 1. CSVインポート（基本データのUPSERT登録）", expanded=False):
         col_csv, col_opt = st.columns([2, 1])
         with col_csv:
             uploaded_csv = st.file_uploader("基幹システムのCSVファイルを選択", type=["csv"])
@@ -164,9 +153,6 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                 df = pd.read_csv(io.StringIO(csv_text), header=header_row - 1)
                 df = df.fillna("")
                 
-                st.write("▼ プレビュー (最初の3行)")
-                st.dataframe(df.head(3), use_container_width=True)
-                
                 cols = ["(未割り当て)"] + [str(c) for c in df.columns.tolist()]
                 
                 st.markdown("**列の紐付け（マッピング）**")
@@ -176,30 +162,49 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                 map_name = c3.selectbox("商品名", cols, index=0)
                 map_maker = c4.selectbox("メーカー", cols, index=0)
                 map_model = c5.selectbox("型式", cols, index=0)
-                map_price = c6.selectbox("レンタル価格", cols, index=0)
+                map_price = c6.selectbox("レンタル価格（単位数）", cols, index=0)
                 
-                if st.button("マッピングしてシステムに登録", type="primary"):
-                    new_items = []
+                if st.button("マッピングしてシステムに登録（更新/追加）", type="primary"):
+                    new_count, update_count = 0, 0
+                    
                     for _, row in df.iterrows():
-                        new_items.append({
-                            "tais_code": str(row[map_tais]).strip() if map_tais != "(未割り当て)" else "",
-                            "category": str(row[map_category]).strip() if map_category != "(未割り当て)" else "【貸与】未分類",
-                            "name": str(row[map_name]).strip() if map_name != "(未割り当て)" else "",
-                            "maker": str(row[map_maker]).strip() if map_maker != "(未割り当て)" else "",
-                            "model": str(row[map_model]).strip() if map_model != "(未割り当て)" else "",
-                            "rental_price": str(row[map_price]).strip() if map_price != "(未割り当て)" else "",
-                            "is_active": True, "memo": "", "delete_flag": False
-                        })
-                    st.session_state.master_data.extend(new_items)
+                        tais = str(row[map_tais]).strip() if map_tais != "(未割り当て)" else ""
+                        category = str(row[map_category]).strip() if map_category != "(未割り当て)" else "【貸与】未分類"
+                        name = str(row[map_name]).strip() if map_name != "(未割り当て)" else ""
+                        maker = str(row[map_maker]).strip() if map_maker != "(未割り当て)" else ""
+                        model = str(row[map_model]).strip() if map_model != "(未割り当て)" else ""
+                        price = str(row[map_price]).strip() if map_price != "(未割り当て)" else ""
+                        
+                        # TAISコードで既存商品を検索（空白以外）
+                        existing_item = next((item for item in st.session_state.master_data if item.get("tais_code") == tais and tais != ""), None)
+                        
+                        if existing_item:
+                            # 既存商品の場合は、基本項目のみ更新（AI追加データは維持）
+                            existing_item["category"] = category
+                            existing_item["name"] = name
+                            existing_item["maker"] = maker
+                            existing_item["model"] = model
+                            existing_item["rental_price"] = price
+                            update_count += 1
+                        else:
+                            # 新規商品の場合はマスタに追加
+                            st.session_state.master_data.append({
+                                "tais_code": tais, "category": category, "name": name, 
+                                "maker": maker, "model": model, "rental_price": price,
+                                "is_active": True, "memo": "", "delete_flag": False,
+                                "catchphrase": "", "benefit_1": "", "benefit_2": "", "benefit_3": "", "safety_note": ""
+                            })
+                            new_count += 1
+                            
                     save_master_data()
-                    st.success(f"{len(new_items)}件をマスタに登録しました！リストを更新します...")
-                    time.sleep(1) 
+                    st.success(f"処理完了！ (新規追加: {new_count}件, 基本情報更新: {update_count}件)")
+                    time.sleep(1.5) 
                     st.rerun()    
             except Exception as e:
                 st.error(f"CSV読み込みエラー: {e}")
 
-    with st.expander("📚 2. ハイブリッドAI カタログ全自動結合（Document AI × Gemini）", expanded=True):
-        st.markdown("専用OCRでテキストを完全抽出し、AIで漏れなくマスタへ結合します。")
+    with st.expander("📚 2. ハイブリッドAI カタログ全自動結合（未設定商品のみ）", expanded=True):
+        st.markdown("PDFを解析し、マスタ内の**「AIデータが未設定の商品」に対してのみ**情報を結合します。")
         
         maker_options = ["(選択してください)"]
         maker_dict = {}
@@ -218,7 +223,7 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
             target_prefix = maker_dict[selected_maker_label]
             uploaded_pdfs = st.file_uploader("カタログPDFを選択（複数ファイルをドロップ可）", type=["pdf"], accept_multiple_files=True)
             
-            if uploaded_pdfs and st.button("🚀 ハイブリッド解析スタート", type="primary"):
+            if uploaded_pdfs and st.button("🚀 追加解析スタート", type="primary"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 results_summary = []
@@ -226,8 +231,7 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
 
                 def analyze_pdf(pdf_bytes):
                     ocr_text = process_document_ocr(pdf_bytes)
-                    
-                    prompt = f"""以下のOCR抽出テキスト（福祉用具カタログ）を隅々まで解析し、記載されている全ての商品を抽出してください。
+                    prompt = f"""以下のOCR抽出テキストを隅々まで解析し、記載されている全ての商品を抽出してください。
 
 【抽出項目】"model" (型式), "name" (商品名), "tais_code" (TAISコード:記載がある場合のみ)
 【スライド要素】
@@ -235,28 +239,20 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
 - "benefit_1"〜"benefit_3": 視覚的・機能的メリット（各30文字以内）
 - "safety_note": 現場で伝えるべき注意事項
 
-【⚠️プログラミング上の絶対ルール（必ず守ること）⚠️】
-1. 出力するテキストの中に「改行（\\n）」を絶対に入れないでください。
-2. テキストの中に「"（ダブルクォーテーション）」を含めないでください。必要な場合は「'（シングルクォーテーション）」に置き換えてください。
-3. 完璧なJSON配列として出力し、途中で途切れないようにしてください。
-
+【⚠️プログラミング上の絶対ルール】
+1. 出力するテキストの中に「改行（\\n）」を絶対に入れないこと。
+2. テキストの中に「"（ダブルクォーテーション）」を含めないこと（必要な場合はシングルクォーテーションに置換）。
+3. 完璧なJSON配列として出力すること。
 【フォーマット厳守】 [{{"model":"", "name":"", "tais_code":"", "catchphrase":"", "benefit_1":"", "benefit_2":"", "benefit_3":"", "safety_note":""}}]
 
 --- OCR抽出テキスト ---
 {ocr_text}
 """
-                    config = types.GenerateContentConfig(
-                        response_mime_type="application/json", 
-                        temperature=0.0, 
-                        max_output_tokens=8192
-                    )
+                    config = types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0, max_output_tokens=8192)
                     response = client_ai.models.generate_content(model="gemini-3.6-flash", contents=prompt, config=config)
                     clean_json = response.text.strip().replace("```json", "").replace("```", "")
-                    
-                    try:
-                        return json.loads(clean_json)
-                    except json.JSONDecodeError as e:
-                        raise ValueError(f"AIのデータ形式エラー。再実行してください。（詳細: {str(e)}）")
+                    try: return json.loads(clean_json)
+                    except Exception as e: raise ValueError(f"AIのデータ形式エラー ({str(e)})")
 
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     futures = {executor.submit(analyze_pdf, pdf_file.getvalue()): pdf_file for pdf_file in uploaded_pdfs}
@@ -275,8 +271,7 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                                 extracted_tais = normalize_str(res.get("tais_code", ""))
                                 
                                 for item in st.session_state.master_data:
-                                    item_prefix = get_tais_maker_prefix(item.get("tais_code", ""))
-                                    if item_prefix == target_prefix:
+                                    if get_tais_maker_prefix(item.get("tais_code", "")) == target_prefix:
                                         master_model = normalize_str(item.get("model", ""))
                                         master_name = normalize_str(item.get("name", ""))
                                         master_tais = normalize_str(item.get("tais_code", ""))
@@ -287,17 +282,21 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                                         elif extracted_name and len(extracted_name) > 2 and extracted_name in master_name: is_match = True
                                             
                                         if is_match:
-                                            item["catchphrase"] = res.get("catchphrase", "")
-                                            item["benefit_1"] = res.get("benefit_1", "")
-                                            item["benefit_2"] = res.get("benefit_2", "")
-                                            item["benefit_3"] = res.get("benefit_3", "")
-                                            item["safety_note"] = res.get("safety_note", "")
-                                            match_count += 1
-                                            results_summary.append(f"✅ 結合成功: {pdf_file.name} ➔ {item.get('name')} (型式: {item.get('model')})")
+                                            # ★すでにAI情報が入っている商品は上書きせずスキップする処理を追加
+                                            if item.get("catchphrase"):
+                                                results_summary.append(f"⏩ スキップ: {item.get('name')} (既にAIデータ設定済み)")
+                                            else:
+                                                item["catchphrase"] = res.get("catchphrase", "")
+                                                item["benefit_1"] = res.get("benefit_1", "")
+                                                item["benefit_2"] = res.get("benefit_2", "")
+                                                item["benefit_3"] = res.get("benefit_3", "")
+                                                item["safety_note"] = res.get("safety_note", "")
+                                                match_count += 1
+                                                results_summary.append(f"✅ 結合成功: {pdf_file.name} ➔ {item.get('name')} (型式: {item.get('model')})")
                                             break
                             
-                            if match_count == 0: results_summary.append(f"⚠️ マッチ対象なし: {pdf_file.name}")
-                            else: results_summary.append(f"📄 {pdf_file.name} から計 {match_count} 件の商品を抽出し、マスタに結合しました。")
+                            if match_count == 0: results_summary.append(f"⚠️ 新規結合対象なし: {pdf_file.name}")
+                            else: results_summary.append(f"📄 {pdf_file.name} から計 {match_count} 件の新情報をマスタに追加しました。")
 
                         except Exception as e:
                             results_summary.append(f"❌ 解析エラー ({pdf_file.name}): {e}")
@@ -312,6 +311,7 @@ if page_mode == "⚙️ ナレッジ・マスタ管理":
                 with st.expander("処理結果の詳細を見る", expanded=True):
                     for msg in results_summary:
                         if "✅" in msg: st.success(msg)
+                        elif "⏩" in msg: st.info(msg)
                         elif "⚠️" in msg: st.warning(msg)
                         elif "📄" in msg: st.info(msg)
                         else: st.error(msg)
@@ -370,7 +370,6 @@ elif page_mode == "📝 アセスメント ＆ AI提案":
                 active_items = [item for item in st.session_state.master_data if item.get("is_active", True) and item.get("category") in selected_cats]
                 master_text = "【利用可能な自社登録マスタ】\n"
                 for item in active_items:
-                    # ★AIにスライドデータがある商品をアピールする
                     has_ai_data = "★スライド詳細データあり" if item.get("catchphrase") else ""
                     master_text += f"- TAIS:{item.get('tais_code','')} | 品名:{item.get('name','')} | 種目:{item.get('category','')} | 型式:{item.get('model','')} {has_ai_data}\n"
 
@@ -421,12 +420,10 @@ elif page_mode == "📝 アセスメント ＆ AI提案":
                 with col_slide:
                     st.markdown("**📺 ご利用者向けスライド（可視化）**")
                     tais_list = p.get("tais_codes", [])
-                    # ★空文字のTAISを除外して、重複エラーを防ぐ
                     valid_tais = [t for t in tais_list if str(t).strip()]
                     found_items = [item for item in st.session_state.master_data if item.get("tais_code") in valid_tais and item.get("tais_code")]
                     
                     if found_items:
-                        # ★ボタンキーにインデックス(j)を足して重複エラーを完全回避
                         for j, item in enumerate(found_items):
                             btn_key = f"slide_btn_{i}_{j}_{item.get('tais_code','x')}"
                             if st.button(f"📱 {item.get('name','')} の図解", key=btn_key, use_container_width=True):
